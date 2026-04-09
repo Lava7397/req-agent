@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import os
+import time
 from typing import Type, TypeVar
 from pydantic import BaseModel, ValidationError
 from dotenv import load_dotenv
@@ -20,8 +21,30 @@ class LLMClient:
         self.litellm = litellm
         self.model = model or os.getenv("DEFAULT_MODEL", "gpt-4o")
         self.temperature = temperature
-        # Suppress litellm verbose output
         litellm.suppress_debug_info = True
+
+    def _call(self, messages: list[dict], max_retries: int = 3) -> str:
+        """Call LLM with retry on transient errors."""
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                response = self.litellm.completion(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=4096,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                # Retry on transient errors (403, 429, 500, timeout)
+                if any(code in error_str for code in ["403", "429", "500", "timeout", "Timeout"]):
+                    wait = 2 ** attempt
+                    time.sleep(wait)
+                    continue
+                raise
+        raise last_error
 
     def complete(
         self,
@@ -39,13 +62,7 @@ class LLMClient:
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                response = self.litellm.completion(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=4096,
-                )
-                content = response.choices[0].message.content.strip()
+                content = self._call(messages, max_retries=3)
 
                 # Strip markdown code fences if present
                 if content.startswith("```"):
@@ -60,7 +77,6 @@ class LLMClient:
             except (json.JSONDecodeError, ValidationError) as e:
                 last_error = e
                 if attempt < max_retries:
-                    # Add error context for retry
                     messages.append({"role": "assistant", "content": content if 'content' in dir() else ""})
                     messages.append({
                         "role": "user",
@@ -72,11 +88,4 @@ class LLMClient:
 
     def complete_raw(self, messages: list[dict], **kwargs) -> str:
         """Raw completion without JSON parsing."""
-        response = self.litellm.completion(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=4096,
-            **kwargs,
-        )
-        return response.choices[0].message.content.strip()
+        return self._call(messages)
