@@ -78,6 +78,17 @@ class LLMClient:
 
         raise Exception(f"All models failed. Last error: {last_error}")
 
+    def _clean_json(self, text: str) -> str:
+        """Clean common JSON issues from LLM output."""
+        import re
+        # Fix invalid \uXXXX escapes (incomplete unicode)
+        text = re.sub(r'\\u[0-9a-fA-F]{0,3}(?![0-9a-fA-F])', '', text)
+        # Fix trailing commas
+        text = re.sub(r',\s*([\]}])', r'\1', text)
+        # Fix single quotes used as strings (naive but helps)
+        # text = text.replace("'", '"')
+        return text
+
     def complete(
         self,
         system: str,
@@ -102,6 +113,7 @@ class LLMClient:
                     content = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
 
                 if response_format:
+                    content = self._clean_json(content)
                     data = json.loads(content)
                     return response_format.model_validate(data)
                 return content
@@ -110,7 +122,7 @@ class LLMClient:
                 last_error = e
                 if attempt < max_retries:
                     messages.append({"role": "assistant", "content": content if 'content' in dir() else ""})
-                    messages.append({"role": "user", "content": f"Error: {e}. Return valid JSON only."})
+                    messages.append({"role": "user", "content": f"JSON parse error: {e}. Return valid JSON only, no unicode escapes."})
                     continue
 
         raise ValueError(f"Failed after {max_retries + 1} attempts: {last_error}")

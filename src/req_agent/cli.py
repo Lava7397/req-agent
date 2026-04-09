@@ -238,6 +238,9 @@ def guide(
     )
 
     path = Path(output_path)
+    # 如果输入的是已存在的目录，自动追加文件名
+    if path.is_dir():
+        path = path / default_name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(prd_md, encoding="utf-8")
 

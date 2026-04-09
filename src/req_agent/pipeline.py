@@ -45,33 +45,34 @@ class Pipeline:
         step_fn()
         return getter()
 
+    def _step(self, step_name: str, prompt_fn, response_type):
+        """Run a single pipeline step with retry."""
+        for attempt in range(5):
+            try:
+                result = self.llm.complete(
+                    system=prompts.SYSTEM_PROMPT,
+                    user=prompt_fn(),
+                    response_format=response_type,
+                    max_retries=3,
+                )
+                setattr(self.ctx, step_name, result)
+                return
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                continue
+
     def _step1(self):
-        self.ctx.brief = self.llm.complete(
-            system=prompts.SYSTEM_PROMPT,
-            user=prompts.step1_prompt(self.ctx),
-            response_format=RequirementBrief,
-        )
+        self._step("brief", lambda: prompts.step1_prompt(self.ctx), RequirementBrief)
 
     def _step2(self):
-        self.ctx.user_analysis = self.llm.complete(
-            system=prompts.SYSTEM_PROMPT,
-            user=prompts.step2_prompt(self.ctx),
-            response_format=UserAnalysis,
-        )
+        self._step("user_analysis", lambda: prompts.step2_prompt(self.ctx), UserAnalysis)
 
     def _step3(self):
-        self.ctx.functional = self.llm.complete(
-            system=prompts.SYSTEM_PROMPT,
-            user=prompts.step3_prompt(self.ctx),
-            response_format=FunctionalSpec,
-        )
+        self._step("functional", lambda: prompts.step3_prompt(self.ctx), FunctionalSpec)
 
     def _step4(self):
-        self.ctx.nonfunctional = self.llm.complete(
-            system=prompts.SYSTEM_PROMPT,
-            user=prompts.step4_prompt(self.ctx),
-            response_format=NonFunctionalSpec,
-        )
+        self._step("nonfunctional", lambda: prompts.step4_prompt(self.ctx), NonFunctionalSpec)
 
     def _render(self) -> str:
         from jinja2 import Environment, FileSystemLoader
