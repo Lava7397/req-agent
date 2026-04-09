@@ -13,7 +13,14 @@
 ## 安装
 
 ```bash
-pip install req-agent
+# 推荐：pipx（隔离环境，不污染系统 Python）
+pipx install req-agent
+
+# 或者：pip
+python3 -m pip install req-agent
+
+# 如果没有 pip
+python3 -m ensurepip --upgrade
 ```
 
 ## 首次配置
