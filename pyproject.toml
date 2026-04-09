@@ -1,6 +1,6 @@
 [project]
 name = "req-agent"
-version = "0.2.0"
+version = "0.2.1"
 description = "One-sentence requirement → full PRD document agent"
 requires-python = ">=3.10"
 dependencies = [
@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "jinja2>=3.1.0",
     "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]

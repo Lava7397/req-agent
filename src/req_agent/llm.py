@@ -1,50 +1,82 @@
-"""LiteLLM wrapper for multi-provider support."""
+"""LLM client with fallback support."""
 
 from __future__ import annotations
 import json
 import os
 import time
+import httpx
 from typing import Type, TypeVar
 from pydantic import BaseModel, ValidationError
-from dotenv import load_dotenv
-
-load_dotenv()
 
 T = TypeVar("T", bound=BaseModel)
 
+# Fallback models ordered by reliability
+FALLBACK_MODELS = [
+    "openrouter/meta-llama/llama-3.1-8b-instruct",
+    "openrouter/qwen/qwen3-coder",
+    "openrouter/meta-llama/llama-3.3-70b-instruct",
+]
+
 
 class LLMClient:
-    """Thin wrapper around litellm for structured JSON output."""
+    """LLM client with direct HTTP fallback (bypasses litellm 403 issues)."""
 
     def __init__(self, model: str | None = None, temperature: float = 0.3):
-        import litellm
-        self.litellm = litellm
-        self.model = model or os.getenv("DEFAULT_MODEL", "gpt-4o")
+        self.model = model or os.getenv("DEFAULT_MODEL", "openrouter/meta-llama/llama-3.1-8b-instruct")
         self.temperature = temperature
-        litellm.suppress_debug_info = True
+        self.api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
-    def _call(self, messages: list[dict], max_retries: int = 3) -> str:
-        """Call LLM with retry on transient errors."""
+    def _call_openai_compat(self, messages: list[dict], model: str) -> str:
+        """Direct HTTP call to OpenAI-compatible API (avoids litellm 403 issue)."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        # OpenRouter specific headers
+        if "openrouter" in model:
+            headers["HTTP-Referer"] = "https://github.com/Lava7397/req-agent"
+            model = model.replace("openrouter/", "")
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": 4096,
+        }
+
+        resp = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+
+    def _call_with_fallback(self, messages: list[dict]) -> str:
+        """Try primary model, then fallback models on failure."""
+        models_to_try = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
+
         last_error = None
-        for attempt in range(max_retries):
-            try:
-                response = self.litellm.completion(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=4096,
-                )
-                return response.choices[0].message.content.strip()
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                # Retry on transient errors (403, 429, 500, timeout)
-                if any(code in error_str for code in ["403", "429", "500", "timeout", "Timeout"]):
-                    wait = 2 ** attempt
-                    time.sleep(wait)
+        for model in models_to_try:
+            for attempt in range(3):
+                try:
+                    return self._call_openai_compat(messages, model)
+                except httpx.HTTPStatusError as e:
+                    last_error = e
+                    status = e.response.status_code
+                    if status in (403, 429, 500, 502, 503):
+                        time.sleep(2 ** attempt)
+                        continue
+                    # Other errors: try next model
+                    break
+                except Exception as e:
+                    last_error = e
+                    time.sleep(2 ** attempt)
                     continue
-                raise
-        raise last_error
+
+        raise Exception(f"All models failed. Last error: {last_error}")
 
     def complete(
         self,
@@ -62,9 +94,9 @@ class LLMClient:
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                content = self._call(messages, max_retries=3)
+                content = self._call_with_fallback(messages)
 
-                # Strip markdown code fences if present
+                # Strip markdown code fences
                 if content.startswith("```"):
                     lines = content.split("\n")
                     content = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
@@ -78,14 +110,7 @@ class LLMClient:
                 last_error = e
                 if attempt < max_retries:
                     messages.append({"role": "assistant", "content": content if 'content' in dir() else ""})
-                    messages.append({
-                        "role": "user",
-                        "content": f"Error: {e}. Please fix and return valid JSON only."
-                    })
+                    messages.append({"role": "user", "content": f"Error: {e}. Return valid JSON only."})
                     continue
 
         raise ValueError(f"Failed after {max_retries + 1} attempts: {last_error}")
-
-    def complete_raw(self, messages: list[dict], **kwargs) -> str:
-        """Raw completion without JSON parsing."""
-        return self._call(messages)
